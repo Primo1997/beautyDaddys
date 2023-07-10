@@ -1,0 +1,15 @@
+runtime: php
+env: flex
+
+runtime_config:
+  document_root: public
+
+skip_files:
+  .env
+
+env_variables:
+  APP_LOG: errorlog
+  APP_KEY: base64:WSc1TlXUbn5UQVIblTYkTB4pfmKXo8qY/ZQowGeAPXI=
+  STORAGE_DIR: /tmp
+
+  cloud_sql_instances: daddys-391304:us-central1:beautypets
