@@ -7,7 +7,6 @@ use Illuminate\Contracts\Redis\Factory;
 use Illuminate\Redis\Connections\Connection;
 use Illuminate\Redis\Connectors\PhpRedisConnector;
 use Illuminate\Redis\Connectors\PredisConnector;
-use Illuminate\Support\Arr;
 use Illuminate\Support\ConfigurationUrlParser;
 use InvalidArgumentException;
 
@@ -109,7 +108,7 @@ class RedisManager implements Factory
         if (isset($this->config[$name])) {
             return $this->connector()->connect(
                 $this->parseConnectionConfiguration($this->config[$name]),
-                array_merge(Arr::except($options, 'parameters'), ['parameters' => Arr::get($options, 'parameters.'.$name, Arr::get($options, 'parameters', []))])
+                $options
             );
         }
 
@@ -236,19 +235,6 @@ class RedisManager implements Factory
     public function setDriver($driver)
     {
         $this->driver = $driver;
-    }
-
-    /**
-     * Disconnect the given connection and remove from local cache.
-     *
-     * @param  string|null  $name
-     * @return void
-     */
-    public function purge($name = null)
-    {
-        $name = $name ?: 'default';
-
-        unset($this->connections[$name]);
     }
 
     /**

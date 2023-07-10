@@ -23,7 +23,7 @@ class ViewNotFoundSolutionProvider implements HasSolutionsForThrowable
             return false;
         }
 
-        return (bool)preg_match(self::REGEX, $throwable->getMessage(), $matches);
+        return preg_match(self::REGEX, $throwable->getMessage(), $matches);
     }
 
     public function getSolutions(Throwable $throwable): array
@@ -33,13 +33,6 @@ class ViewNotFoundSolutionProvider implements HasSolutionsForThrowable
         $missingView = $matches[1] ?? null;
 
         $suggestedView = $this->findRelatedView($missingView);
-
-        if ($suggestedView == $missingView) {
-            return [
-                BaseSolution::create("{$missingView} was not found.")
-                    ->setSolutionDescription('View names should not contain the . character!'),
-            ];
-        }
 
         if ($suggestedView) {
             return [

@@ -2,16 +2,12 @@
 
 namespace Facade\Ignition;
 
-use Exception;
-use Facade\FlareClient\Api;
 use Facade\FlareClient\Flare;
 use Facade\FlareClient\Http\Client;
 use Facade\Ignition\Commands\SolutionMakeCommand;
-use Facade\Ignition\Commands\SolutionProviderMakeCommand;
 use Facade\Ignition\Commands\TestCommand;
 use Facade\Ignition\Context\LaravelContextDetector;
 use Facade\Ignition\DumpRecorder\DumpRecorder;
-use Facade\Ignition\ErrorPage\IgnitionExceptionRenderer;
 use Facade\Ignition\ErrorPage\IgnitionWhoopsHandler;
 use Facade\Ignition\ErrorPage\Renderer;
 use Facade\Ignition\Exceptions\InvalidConfig;
@@ -22,41 +18,32 @@ use Facade\Ignition\Http\Controllers\ShareReportController;
 use Facade\Ignition\Http\Controllers\StyleController;
 use Facade\Ignition\Http\Middleware\IgnitionConfigValueEnabled;
 use Facade\Ignition\Http\Middleware\IgnitionEnabled;
-use Facade\Ignition\JobRecorder\JobRecorder;
 use Facade\Ignition\Logger\FlareHandler;
 use Facade\Ignition\LogRecorder\LogRecorder;
 use Facade\Ignition\Middleware\AddDumps;
 use Facade\Ignition\Middleware\AddEnvironmentInformation;
-use Facade\Ignition\Middleware\AddExceptionInformation;
 use Facade\Ignition\Middleware\AddGitInformation;
-use Facade\Ignition\Middleware\AddJobInformation;
 use Facade\Ignition\Middleware\AddLogs;
 use Facade\Ignition\Middleware\AddQueries;
 use Facade\Ignition\Middleware\AddSolutions;
+use Facade\Ignition\Middleware\CustomizeGrouping;
 use Facade\Ignition\Middleware\SetNotifierName;
 use Facade\Ignition\QueryRecorder\QueryRecorder;
 use Facade\Ignition\SolutionProviders\BadMethodCallSolutionProvider;
 use Facade\Ignition\SolutionProviders\DefaultDbNameSolutionProvider;
 use Facade\Ignition\SolutionProviders\IncorrectValetDbCredentialsSolutionProvider;
 use Facade\Ignition\SolutionProviders\InvalidRouteActionSolutionProvider;
-use Facade\Ignition\SolutionProviders\LazyLoadingViolationSolutionProvider;
 use Facade\Ignition\SolutionProviders\MergeConflictSolutionProvider;
 use Facade\Ignition\SolutionProviders\MissingAppKeySolutionProvider;
 use Facade\Ignition\SolutionProviders\MissingColumnSolutionProvider;
 use Facade\Ignition\SolutionProviders\MissingImportSolutionProvider;
-use Facade\Ignition\SolutionProviders\MissingLivewireComponentSolutionProvider;
-use Facade\Ignition\SolutionProviders\MissingMixManifestSolutionProvider;
 use Facade\Ignition\SolutionProviders\MissingPackageSolutionProvider;
 use Facade\Ignition\SolutionProviders\RunningLaravelDuskInProductionProvider;
 use Facade\Ignition\SolutionProviders\SolutionProviderRepository;
 use Facade\Ignition\SolutionProviders\TableNotFoundSolutionProvider;
-use Facade\Ignition\SolutionProviders\UndefinedLivewireMethodSolutionProvider;
-use Facade\Ignition\SolutionProviders\UndefinedLivewirePropertySolutionProvider;
-use Facade\Ignition\SolutionProviders\UndefinedPropertySolutionProvider;
 use Facade\Ignition\SolutionProviders\UndefinedVariableSolutionProvider;
 use Facade\Ignition\SolutionProviders\UnknownValidationSolutionProvider;
 use Facade\Ignition\SolutionProviders\ViewNotFoundSolutionProvider;
-use Facade\Ignition\Support\SentReports;
 use Facade\Ignition\Views\Engines\CompilerEngine;
 use Facade\Ignition\Views\Engines\PhpEngine;
 use Facade\IgnitionContracts\SolutionProviderRepository as SolutionProviderRepositoryContract;
@@ -70,12 +57,9 @@ use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\View\Engines\CompilerEngine as LaravelCompilerEngine;
 use Illuminate\View\Engines\PhpEngine as LaravelPhpEngine;
-use Laravel\Octane\Events\RequestReceived;
-use Laravel\Octane\Events\TaskReceived;
-use Laravel\Octane\Events\TickReceived;
-use Livewire\CompilerEngineForIgnition;
 use Monolog\Logger;
 use Throwable;
+use Whoops\Handler\HandlerInterface;
 
 class IgnitionServiceProvider extends ServiceProvider
 {
@@ -89,36 +73,17 @@ class IgnitionServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__.'/../config/ignition.php' => config_path('ignition.php'),
             ], 'ignition-config');
-
-            if (isset($_SERVER['argv']) && ['artisan', 'tinker'] === $_SERVER['argv']) {
-                Api::sendReportsInBatches(false);
-            }
-
-            $this->app->make(JobRecorder::class)->register();
         }
 
         $this
             ->registerViewEngines()
             ->registerHousekeepingRoutes()
             ->registerLogHandler()
-            ->registerCommands();
+            ->registerCommands()
+            ->setupQueue($this->app->queue);
 
-        if ($this->app->bound('queue')) {
-            $this->setupQueue($this->app->get('queue'));
-        }
-
-        if (isset($_SERVER['LARAVEL_OCTANE'])) {
-            $this->setupOctane();
-        }
-
-        if (config('flare.reporting.report_logs', true)) {
-            $this->app->make(LogRecorder::class)->register();
-        }
-
-        if (config('flare.reporting.report_queries', true)) {
-            $this->app->make(QueryRecorder::class)->register();
-        }
-
+        $this->app->make(QueryRecorder::class)->register();
+        $this->app->make(LogRecorder::class)->register();
         $this->app->make(DumpRecorder::class)->register();
     }
 
@@ -129,26 +94,20 @@ class IgnitionServiceProvider extends ServiceProvider
 
         $this
             ->registerSolutionProviderRepository()
-            ->registerRenderer()
             ->registerExceptionRenderer()
+            ->registerWhoopsHandler()
             ->registerIgnitionConfig()
             ->registerFlare()
-            ->registerDumpCollector()
-            ->registerJobRecorder();
+            ->registerLogRecorder()
+            ->registerDumpCollector();
 
-        if (config('flare.reporting.report_logs', true)) {
-            $this->registerLogRecorder();
-        }
-
-        if (config('flare.reporting.report_queries', true)) {
+        if (config('flare.reporting.report_queries')) {
             $this->registerQueryRecorder();
         }
 
         if (config('flare.reporting.anonymize_ips')) {
-            $this->app->get(Flare::class)->anonymizeIp();
+            $this->app->get('flare.client')->anonymizeIp();
         }
-
-        $this->app->get(Flare::class)->censorRequestBodyFields(config('flare.reporting.censor_request_body_fields', ['password']));
 
         $this->registerBuiltInMiddleware();
     }
@@ -160,14 +119,10 @@ class IgnitionServiceProvider extends ServiceProvider
         }
 
         $this->app->make('view.engine.resolver')->register('php', function () {
-            return new PhpEngine($this->app['files']);
+            return new PhpEngine();
         });
 
         $this->app->make('view.engine.resolver')->register('blade', function () {
-            if (class_exists(CompilerEngineForIgnition::class)) {
-                return new CompilerEngineForIgnition($this->app['blade.compiler']);
-            }
-
             return new CompilerEngine($this->app['blade.compiler']);
         });
 
@@ -213,7 +168,7 @@ class IgnitionServiceProvider extends ServiceProvider
         return $this;
     }
 
-    protected function registerRenderer()
+    protected function registerExceptionRenderer()
     {
         $this->app->bind(Renderer::class, function () {
             return new Renderer(__DIR__.'/../resources/views/');
@@ -222,19 +177,11 @@ class IgnitionServiceProvider extends ServiceProvider
         return $this;
     }
 
-    protected function registerExceptionRenderer()
+    protected function registerWhoopsHandler()
     {
-        if (interface_exists(\Whoops\Handler\HandlerInterface::class)) {
-            $this->app->bind(\Whoops\Handler\HandlerInterface::class, function (Application $app) {
-                return $app->make(IgnitionWhoopsHandler::class);
-            });
-        }
-
-        if (interface_exists(\Illuminate\Contracts\Foundation\ExceptionRenderer::class)) {
-            $this->app->bind(\Illuminate\Contracts\Foundation\ExceptionRenderer::class, function (Application $app) {
-                return $app->make(IgnitionExceptionRenderer::class);
-            });
-        }
+        $this->app->bind(HandlerInterface::class, function (Application $app) {
+            return $app->make(IgnitionWhoopsHandler::class);
+        });
 
         return $this;
     }
@@ -264,21 +211,21 @@ class IgnitionServiceProvider extends ServiceProvider
             return new Client(
                 config('flare.key'),
                 config('flare.secret'),
-                config('flare.base_url', 'https://reporting.flareapp.io/api')
+                config('flare.base_url', 'https://flareapp.io/api')
             );
         });
 
-        $this->app->singleton(SentReports::class);
-
         $this->app->alias('flare.http', Client::class);
 
-        $this->app->singleton(Flare::class, function () {
-            $client = new Flare($this->app->get('flare.http'), new LaravelContextDetector(), $this->app);
+        $this->app->singleton('flare.client', function () {
+            $client = new Flare($this->app->get('flare.http'), new LaravelContextDetector, $this->app);
             $client->applicationPath(base_path());
             $client->stage(config('app.env'));
 
             return $client;
         });
+
+        $this->app->alias('flare.client', Flare::class);
 
         return $this;
     }
@@ -286,10 +233,7 @@ class IgnitionServiceProvider extends ServiceProvider
     protected function registerLogHandler()
     {
         $this->app->singleton('flare.logger', function ($app) {
-            $handler = new FlareHandler(
-                $app->make(Flare::class),
-                $app->make(SentReports::class)
-            );
+            $handler = new FlareHandler($app->make('flare.client'));
 
             $logLevelString = config('logging.channels.flare.level', 'error');
 
@@ -325,14 +269,13 @@ class IgnitionServiceProvider extends ServiceProvider
         return $logLevel;
     }
 
-    protected function registerLogRecorder(): self
+    protected function registerLogRecorder()
     {
-        $this->app->singleton(LogRecorder::class, function (Application $app): LogRecorder {
-            return new LogRecorder(
-                $app,
-                $app->get('config')->get('flare.reporting.maximum_number_of_collected_logs')
-            );
-        });
+        $logCollector = $this->app->make(LogRecorder::class);
+
+        $this->app->singleton(LogRecorder::class);
+
+        $this->app->instance(LogRecorder::class, $logCollector);
 
         return $this;
     }
@@ -348,22 +291,10 @@ class IgnitionServiceProvider extends ServiceProvider
         return $this;
     }
 
-    protected function registerJobRecorder()
-    {
-        if (! $this->app->runningInConsole()) {
-            return $this;
-        }
-
-        $this->app->singleton(JobRecorder::class);
-
-        return $this;
-    }
-
     protected function registerCommands()
     {
         $this->app->bind('command.flare:test', TestCommand::class);
         $this->app->bind('command.make:solution', SolutionMakeCommand::class);
-        $this->app->bind('command.make:solution-provider', SolutionProviderMakeCommand::class);
 
         if ($this->app['config']->get('flare.key')) {
             $this->commands(['command.flare:test']);
@@ -371,60 +302,46 @@ class IgnitionServiceProvider extends ServiceProvider
 
         if ($this->app['config']->get('ignition.register_commands', false)) {
             $this->commands(['command.make:solution']);
-            $this->commands(['command.make:solution-provider']);
         }
 
         return $this;
     }
 
-    protected function registerQueryRecorder(): self
+    protected function registerQueryRecorder()
     {
-        $this->app->singleton(QueryRecorder::class, function (Application $app): QueryRecorder {
-            return new QueryRecorder(
-                $app,
-                $app->get('config')->get('flare.reporting.report_query_bindings'),
-                $app->get('config')->get('flare.reporting.maximum_number_of_collected_queries')
-            );
-        });
+        $queryCollector = $this->app->make(QueryRecorder::class);
+
+        $this->app->singleton(QueryRecorder::class);
+
+        $this->app->instance(QueryRecorder::class, $queryCollector);
 
         return $this;
     }
 
     protected function registerBuiltInMiddleware()
     {
-        $middlewares = [
+        $middleware = collect([
             SetNotifierName::class,
             AddEnvironmentInformation::class,
-            AddExceptionInformation::class,
-        ];
-
-        if (config('flare.reporting.report_logs', true)) {
-            $middlewares[] = AddLogs::class;
-        }
-
-        $middlewares[] = AddDumps::class;
-
-        if (config('flare.reporting.report_queries', true)) {
-            $middlewares[] = AddQueries::class;
-        }
-
-        $middlewares[] = AddSolutions::class;
-
-        if ($this->app->runningInConsole()) {
-            $middlewares[] = AddJobInformation::class;
-        }
-
-        $middleware = collect($middlewares)
-            ->map(function (string $middlewareClass) {
-                return $this->app->make($middlewareClass);
-            });
+            AddLogs::class,
+            AddDumps::class,
+            AddQueries::class,
+            AddSolutions::class,
+        ])
+        ->map(function (string $middlewareClass) {
+            return $this->app->make($middlewareClass);
+        });
 
         if (config('flare.reporting.collect_git_information')) {
             $middleware[] = (new AddGitInformation());
         }
 
+        if (! is_null(config('flare.reporting.grouping_type'))) {
+            $middleware[] = new CustomizeGrouping(config('flare.reporting.grouping_type'));
+        }
+
         foreach ($middleware as $singleMiddleware) {
-            $this->app->get(Flare::class)->registerMiddleware($singleMiddleware);
+            $this->app->get('flare.client')->registerMiddleware($singleMiddleware);
         }
 
         return $this;
@@ -447,12 +364,6 @@ class IgnitionServiceProvider extends ServiceProvider
             RunningLaravelDuskInProductionProvider::class,
             MissingColumnSolutionProvider::class,
             UnknownValidationSolutionProvider::class,
-            UndefinedLivewireMethodSolutionProvider::class,
-            UndefinedLivewirePropertySolutionProvider::class,
-            UndefinedPropertySolutionProvider::class,
-            MissingMixManifestSolutionProvider::class,
-            MissingLivewireComponentSolutionProvider::class,
-            LazyLoadingViolationSolutionProvider::class,
         ];
     }
 
@@ -505,55 +416,18 @@ class IgnitionServiceProvider extends ServiceProvider
         return null;
     }
 
-    protected function resetFlare()
-    {
-        $this->app->get(SentReports::class)->clear();
-        $this->app->get(Flare::class)->reset();
-
-        if (config('flare.reporting.report_logs', true)) {
-            $this->app->make(LogRecorder::class)->reset();
-        }
-
-        if (config('flare.reporting.report_queries', true)) {
-            $this->app->make(QueryRecorder::class)->reset();
-        }
-
-        if ($this->app->runningInConsole()) {
-            $this->app->make(JobRecorder::class)->reset();
-        }
-
-        $this->app->make(DumpRecorder::class)->reset();
-    }
-
     protected function setupQueue(QueueManager $queue)
     {
-        // Reset before executing a queue job to make sure the job's log/query/dump recorders are empty.
-        // When using a sync queue this also reports the queued reports from previous exceptions.
-        $queue->before(function () {
-            $this->resetFlare();
-        });
+        $queue->looping(function () {
+            $this->app->get('flare.client')->reset();
 
-        // Send queued reports (and reset) after executing a queue job.
-        $queue->after(function () {
-            $this->resetFlare();
-        });
+            if (config('flare.reporting.report_queries')) {
+                $this->app->make(QueryRecorder::class)->reset();
+            }
 
-        // Note: the $queue->looping() event can't be used because it's not triggered on Vapor
-    }
+            $this->app->make(LogRecorder::class)->reset();
 
-    /** @psalm-suppress UndefinedClass */
-    protected function setupOctane()
-    {
-        $this->app['events']->listen(RequestReceived::class, function () {
-            $this->resetFlare();
-        });
-
-        $this->app['events']->listen(TaskReceived::class, function () {
-            $this->resetFlare();
-        });
-
-        $this->app['events']->listen(TickReceived::class, function () {
-            $this->resetFlare();
+            $this->app->make(DumpRecorder::class)->reset();
         });
     }
 }

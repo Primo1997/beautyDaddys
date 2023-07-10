@@ -40,31 +40,22 @@ class UndefinedVariableSolutionProvider implements HasSolutionsForThrowable
         return $solutions;
     }
 
-    protected function findCorrectVariableSolutions(
-        ViewException $throwable,
-        string $variableName,
-        string $viewFile
-    ): array {
-        return collect($throwable->getViewData())
-            ->map(function ($value, $key) use ($variableName) {
-                similar_text($variableName, $key, $percentage);
+    protected function findCorrectVariableSolutions(Throwable $throwable, string $variableName, string $viewFile): array
+    {
+        return collect($throwable->getViewData())->map(function ($value, $key) use ($variableName) {
+            similar_text($variableName, $key, $percentage);
 
-                return ['match' => $percentage, 'value' => $value];
-            })
-            ->sortByDesc('match')->filter(function ($var) {
-                return $var['match'] > 40;
-            })
-            ->keys()
-            ->map(function ($suggestion) use ($variableName, $viewFile) {
-                return new SuggestCorrectVariableNameSolution($variableName, $viewFile, $suggestion);
-            })
-            ->map(function ($solution) {
-                return $solution->isRunnable()
-                    ? $solution
-                    : BaseSolution::create($solution->getSolutionTitle())
-                        ->setSolutionDescription($solution->getSolutionDescription());
-            })
-            ->toArray();
+            return ['match' => $percentage, 'value' => $value];
+        })->sortByDesc('match')->filter(function ($var, $key) {
+            return $var['match'] > 40;
+        })->keys()->map(function ($suggestion) use ($variableName, $viewFile) {
+            return new SuggestCorrectVariableNameSolution($variableName, $viewFile, $suggestion);
+        })->map(function ($solution) {
+            return $solution->isRunnable()
+                ? $solution
+                : BaseSolution::create($solution->getSolutionTitle())
+                    ->setSolutionDescription($solution->getSolutionActionDescription());
+        })->toArray();
     }
 
     protected function findOptionalVariableSolution(string $variableName, string $viewFile)
@@ -74,22 +65,18 @@ class UndefinedVariableSolutionProvider implements HasSolutionsForThrowable
         return $optionalSolution->isRunnable()
             ? $optionalSolution
             : BaseSolution::create($optionalSolution->getSolutionTitle())
-                ->setSolutionDescription($optionalSolution->getSolutionDescription());
+                ->setSolutionDescription($optionalSolution->getSolutionActionDescription());
     }
 
     protected function getNameAndView(Throwable $throwable): ?array
     {
-        $pattern = '/Undefined variable:? (.*?) \(View: (.*?)\)/';
+        $pattern = '/Undefined variable: (.*?) \(View: (.*?)\)/';
 
         preg_match($pattern, $throwable->getMessage(), $matches);
-
         if (count($matches) === 3) {
-            [, $variableName, $viewFile] = $matches;
-            $variableName = ltrim($variableName, '$');
+            [$string, $variableName, $viewFile] = $matches;
 
             return compact('variableName', 'viewFile');
         }
-
-        return null;
     }
 }

@@ -33,16 +33,12 @@ class ChangeColumn
             ));
         }
 
-        $schema = $connection->getDoctrineSchemaManager();
-        $databasePlatform = $schema->getDatabasePlatform();
-        $databasePlatform->registerDoctrineTypeMapping('enum', 'string');
-
         $tableDiff = static::getChangedDiff(
-            $grammar, $blueprint, $schema
+            $grammar, $blueprint, $schema = $connection->getDoctrineSchemaManager()
         );
 
         if ($tableDiff !== false) {
-            return (array) $databasePlatform->getAlterTableSQL($tableDiff);
+            return (array) $schema->getDatabasePlatform()->getAlterTableSQL($tableDiff);
         }
 
         return [];
@@ -159,9 +155,6 @@ class ChangeColumn
             case 'binary':
                 $type = 'blob';
                 break;
-            case 'uuid':
-                $type = 'guid';
-                break;
         }
 
         return Type::getType($type);
@@ -198,7 +191,6 @@ class ChangeColumn
             'binary',
             'boolean',
             'date',
-            'dateTime',
             'decimal',
             'double',
             'float',
